@@ -844,7 +844,7 @@ class _AuthScreenState extends State<AuthScreen> {
 }
 
 // ============================================================================
-// HOME & SEARCH SCREEN
+// HOME & SEARCH SCREEN WITH PURE GENRE CATEGORIES
 // ============================================================================
 class HomeScreen extends StatefulWidget {
   final AuthController authController;
@@ -863,19 +863,19 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isSearching = false;
   String? _searchError;
 
-  static const List<String> _quickCategories = [
-    'Synthwave Chill',
-    'Lo-Fi Beats',
-    'Bollywood Hits',
-    'Arijit Singh',
-    'Electronic Focus',
-    'Acoustic Sessions',
+  // Clean pure music genres
+  final List<({String label, String query, IconData icon})> _genreCategories = [
+    (label: 'Baroque Pop & Psychedelic Rock', query: 'Baroque Pop Psychedelic Rock', icon: Icons.album_rounded),
+    (label: 'Drift Phonk', query: 'Drift Phonk', icon: Icons.flash_on_rounded),
+    (label: 'Aggressive Phonk', query: 'Aggressive Phonk Cowbell', icon: Icons.bolt_rounded),
+    (label: 'Melodic Pop', query: 'Melodic Pop Mid Tempo', icon: Icons.music_note_rounded),
+    (label: 'Synthwave & Retrowave', query: 'Synthwave Retrowave', icon: Icons.graphic_eq_rounded),
   ];
 
   @override
   void initState() {
     super.initState();
-    _performSearch('Lo-Fi Beats');
+    _performSearch('Baroque Pop Psychedelic Rock');
     widget.playerController.addListener(_onPlayerUpdate);
   }
 
@@ -998,6 +998,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       body: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
@@ -1024,34 +1025,56 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ),
+          
+          // Genre Section Header
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: Text(
+              'Browse Genres',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.1,
+                color: AppColors.textSecondary,
+              ),
+            ),
+          ),
+
+          // Genre Chips
           SizedBox(
-            height: 44,
+            height: 48,
             child: ListView.separated(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               scrollDirection: Axis.horizontal,
-              itemCount: _quickCategories.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemCount: _genreCategories.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 10),
               itemBuilder: (context, index) {
-                final label = _quickCategories[index];
+                final genre = _genreCategories[index];
                 return ActionChip(
                   backgroundColor: AppColors.cardElevated,
-                  side: BorderSide.none,
-                  label: Text(label, style: const TextStyle(color: AppColors.textPrimary, fontSize: 13)),
+                  avatar: Icon(genre.icon, color: AppColors.accentBlue, size: 18),
+                  side: BorderSide(color: AppColors.primaryBlue.withOpacity(0.3)),
+                  label: Text(
+                    genre.label,
+                    style: const TextStyle(color: AppColors.textPrimary, fontSize: 13, fontWeight: FontWeight.w600),
+                  ),
                   onPressed: () {
-                    _searchCtrl.text = label;
-                    _performSearch(label);
+                    _searchCtrl.text = genre.label;
+                    _performSearch(genre.query);
                   },
                 );
               },
             ),
           ),
           const SizedBox(height: 8),
+
           ListenableBuilder(
             listenable: widget.playerController,
             builder: (context, _) => widget.playerController.isResolvingStream
                 ? const LinearProgressIndicator(color: AppColors.primaryBlue, backgroundColor: AppColors.cardElevated, minHeight: 2)
                 : const SizedBox.shrink(),
           ),
+          
           Expanded(
             child: _isSearching
                 ? const Center(child: CircularProgressIndicator(color: AppColors.primaryBlue))
@@ -1064,7 +1087,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             const SizedBox(height: 12),
                             ElevatedButton(
                               style: ElevatedButton.styleFrom(backgroundColor: AppColors.primaryBlue, foregroundColor: Colors.white),
-                              onPressed: () => _performSearch(_searchCtrl.text.isEmpty ? 'Lo-Fi Beats' : _searchCtrl.text),
+                              onPressed: () => _performSearch(_searchCtrl.text.isEmpty ? 'Baroque Pop' : _searchCtrl.text),
                               child: const Text('RETRY SEARCH'),
                             ),
                           ],
