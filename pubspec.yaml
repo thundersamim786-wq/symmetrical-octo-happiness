@@ -1,5 +1,5 @@
-name: spotube
-description: A self-contained educational music streaming client built with Flutter.
+name: sputube_client
+description: A self-contained educational music streaming client in blue aesthetic.
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -12,7 +12,8 @@ dependencies:
   just_audio: ^0.9.40
   just_audio_background: ^0.0.1-beta.13
   audio_service: ^0.18.15
-  youtube_explode_dart: ^2.2.1
+  youtube_explode_dart: ^2.3.6
+  http: ^1.2.2
   share_plus: ^10.0.2
   shared_preferences: ^2.3.2
   rxdart: ^0.28.0
@@ -24,4 +25,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  
