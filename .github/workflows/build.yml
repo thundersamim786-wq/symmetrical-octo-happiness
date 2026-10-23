@@ -1,0 +1,115 @@
+name: Build Release APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Generate Android Platform Files
+        run: flutter create . --platforms=android --project-name=spotube_edu_client
+
+      - name: Inject Background Audio Permissions & Service into AndroidManifest.xml
+        run: |
+          python3 - << 'EOF'
+          import xml.etree.ElementTree as ET
+
+          manifest_path = "android/app/src/main/AndroidManifest.xml"
+          ET.register_namespace("android", "http://schemas.android.com/apk/res/android")
+          tree = ET.parse(manifest_path)
+          root = tree.getroot()
+          android_ns = "{http://schemas.android.com/apk/res/android}"
+
+          required_permissions = [
+              "android.permission.INTERNET",
+              "android.permission.WAKE_LOCK",
+              "android.permission.FOREGROUND_SERVICE",
+              "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+          ]
+
+          existing_perms = {
+              elem.attrib.get(f"{android_ns}name")
+              for elem in root.findall("uses-permission")
+          }
+
+          for perm in required_permissions:
+              if perm not in existing_perms:
+                  perm_elem = ET.Element("uses-permission", {f"{android_ns}name": perm})
+                  root.insert(0, perm_elem)
+
+          app_elem = root.find("application")
+          if app_elem is not None:
+              app_elem.set(f"{android_ns}usesCleartextTraffic", "true")
+
+              activity_elem = app_elem.find("activity")
+              if activity_elem is not None:
+                  activity_elem.set(
+                      f"{android_ns}name",
+                      "com.ryanheise.audioservice.AudioServiceActivity",
+                  )
+
+              service_elem = ET.SubElement(
+                  app_elem,
+                  "service",
+                  {
+                      f"{android_ns}name": "com.ryanheise.audioservice.AudioService",
+                      f"{android_ns}foregroundServiceType": "mediaPlayback",
+                      f"{android_ns}exported": "true",
+                  },
+              )
+              intent_filter = ET.SubElement(service_elem, "intent-filter")
+              ET.SubElement(
+                  intent_filter,
+                  "action",
+                  {f"{android_ns}name": "android.media.browse.MediaBrowserService"},
+              )
+
+              receiver_elem = ET.SubElement(
+                  app_elem,
+                  "receiver",
+                  {
+                      f"{android_ns}name": "com.ryanheise.audioservice.MediaButtonReceiver",
+                      f"{android_ns}exported": "true",
+                  },
+              )
+              receiver_filter = ET.SubElement(receiver_elem, "intent-filter")
+              ET.SubElement(
+                  receiver_filter,
+                  "action",
+                  {f"{android_ns}name": "android.intent.action.MEDIA_BUTTON"},
+              )
+
+          tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
+          EOF
+
+      - name: Install Flutter Dependencies
+        run: flutter pub get
+
+      - name: Build Release APK
+        run: flutter build apk --release
+
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spotube-edu-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
