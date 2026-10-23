@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:rxdart/rxdart.dart';
@@ -12,7 +13,7 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await JustAudioBackground.init(
-    androidNotificationChannelId: 'com.spotube.edu.channel.audio',
+    androidNotificationChannelId: 'com.sputube.edu.channel.audio',
     androidNotificationChannelName: 'Audio Playback',
     androidNotificationOngoing: true,
   );
@@ -21,15 +22,29 @@ Future<void> main() async {
 }
 
 // ============================================================================
-// THEME CONSTANTS
+// CONFIGURATION (SUPABASE OTP)
+// ============================================================================
+class OtpConfig {
+  static const String supabaseUrl = 'https://vrmhtsvdezrvaoaynpkc.supabase.co';
+  static const String supabaseAnonKey = 'Sb_publishable_ScnsuOMIXGGYw0l7OSot6w__Bcf1nxX';
+
+  static bool get isSupabaseConfigured =>
+      supabaseUrl.isNotEmpty && 
+      supabaseUrl != 'https://YOUR_PROJECT_ID.supabase.co' && 
+      supabaseAnonKey.isNotEmpty;
+}
+
+// ============================================================================
+// THEME CONSTANTS (BLUE THEME AESTHETIC)
 // ============================================================================
 class AppColors {
-  static const Color background = Color(0xFF121212);
-  static const Color cardDark = Color(0xFF181818);
-  static const Color cardElevated = Color(0xFF282828);
-  static const Color spotifyGreen = Color(0xFF1DB954);
+  static const Color background = Color(0xFF0F141C);
+  static const Color cardDark = Color(0xFF161D2B);
+  static const Color cardElevated = Color(0xFF202A3E);
+  static const Color primaryBlue = Color(0xFF0088FF);
+  static const Color accentBlue = Color(0xFF33A1FF);
   static const Color textPrimary = Color(0xFFFFFFFF);
-  static const Color textSecondary = Color(0xFFB3B3B3);
+  static const Color textSecondary = Color(0xFF94A3B8);
 }
 
 // ============================================================================
@@ -80,12 +95,12 @@ class TrackModel {
 
   String toShareToken() {
     final raw = jsonEncode(toJson());
-    return 'spotube://track/${base64Url.encode(utf8.encode(raw))}';
+    return 'sputube://track/${base64Url.encode(utf8.encode(raw))}';
   }
 
   static TrackModel? fromShareToken(String token) {
     try {
-      final cleaned = token.trim().replaceFirst('spotube://track/', '');
+      final cleaned = token.trim().replaceFirst('sputube://track/', '');
       final decoded = utf8.decode(base64Url.decode(cleaned));
       final map = jsonDecode(decoded) as Map<String, dynamic>;
       if ((map['v'] as String?)?.isEmpty ?? true) return null;
@@ -105,16 +120,17 @@ class PositionData {
 }
 
 // ============================================================================
-// AUTHENTICATION CONTROLLER
+// AUTHENTICATION CONTROLLER (SUPABASE EMAIL OTP)
 // ============================================================================
 class AuthController extends ChangeNotifier {
   static const String _keyUserEmail = 'auth_user_email';
+  static const String _keySessionToken = 'auth_session_token';
   static const String _keyIsGuest = 'auth_is_guest';
-  static const String _keyAccounts = 'auth_accounts_map';
 
   final SharedPreferences _prefs;
   String? _email;
   bool _isGuest = false;
+  String? _pendingEmail;
 
   AuthController(this._prefs) {
     _email = _prefs.getString(_keyUserEmail);
@@ -124,44 +140,110 @@ class AuthController extends ChangeNotifier {
   bool get isAuthenticated => (_email != null && _email!.isNotEmpty) || _isGuest;
   bool get isGuest => _isGuest;
   String get displayName => _isGuest ? 'Guest Listener' : (_email ?? 'User');
+  String? get pendingEmail => _pendingEmail;
 
-  Map<String, String> _getAccounts() {
-    final raw = _prefs.getString(_keyAccounts);
-    if (raw == null || raw.isEmpty) return {};
-    final decoded = jsonDecode(raw) as Map<String, dynamic>;
-    return decoded.map((k, v) => MapEntry(k, v.toString()));
+  Future<({bool success, String message})> requestEmailOtp(String email) async {
+    final cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail.contains('@') || !cleanEmail.contains('.')) {
+      return (success: false, message: 'Please enter a valid email address.');
+    }
+
+    if (!OtpConfig.isSupabaseConfigured) {
+      return (
+        success: false,
+        message: 'Supabase URL is not properly configured.'
+      );
+    }
+
+    try {
+      final uri = Uri.parse('${OtpConfig.supabaseUrl}/auth/v1/otp');
+      final response = await http
+          .post(
+            uri,
+            headers: {
+              'apikey': OtpConfig.supabaseAnonKey,
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'email': cleanEmail,
+              'create_user': true,
+            }),
+          )
+          .timeout(const Duration(seconds: 12));
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        _pendingEmail = cleanEmail;
+        notifyListeners();
+        return (
+          success: true,
+          message: 'A secure 6-digit OTP has been emailed to $cleanEmail.'
+        );
+      } else {
+        return (
+          success: false,
+          message: 'Supabase error: ${response.body}'
+        );
+      }
+    } catch (e) {
+      return (
+        success: false,
+        message: 'Network error connecting to auth server: $e'
+      );
+    }
   }
 
-  Future<String?> signIn({
-    required String email,
-    required String password,
-    required bool isSignUp,
-  }) async {
-    final trimmedEmail = email.trim().toLowerCase();
-    if (!trimmedEmail.contains('@') || password.length < 4) {
-      return 'Enter a valid email and a password of at least 4 characters.';
+  Future<String?> verifyEmailOtp(String enteredOtp) async {
+    final code = enteredOtp.trim();
+    if (_pendingEmail == null) return 'Request an OTP first.';
+    if (code.length != 6) return 'Enter the full 6-digit OTP code.';
+
+    if (!OtpConfig.isSupabaseConfigured) {
+      return 'Supabase URL is not configured.';
     }
 
-    final accounts = _getAccounts();
-    if (isSignUp) {
-      if (accounts.containsKey(trimmedEmail)) {
-        return 'An account with this email already exists. Please log in.';
-      }
-      accounts[trimmedEmail] = password;
-      await _prefs.setString(_keyAccounts, jsonEncode(accounts));
-    } else {
-      if (!accounts.containsKey(trimmedEmail) ||
-          accounts[trimmedEmail] != password) {
-        return 'Invalid email or password.';
-      }
-    }
+    try {
+      final uri = Uri.parse('${OtpConfig.supabaseUrl}/auth/v1/verify');
+      final response = await http
+          .post(
+            uri,
+            headers: {
+              'apikey': OtpConfig.supabaseAnonKey,
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'type': 'email',
+              'email': _pendingEmail,
+              'token': code,
+            }),
+          )
+          .timeout(const Duration(seconds: 12));
 
-    _email = trimmedEmail;
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final accessToken = data['access_token'] as String? ?? 'verified';
+        await _completeLogin(_pendingEmail!, accessToken);
+        return null;
+      } else {
+        return 'Invalid or expired OTP code.';
+      }
+    } catch (e) {
+      return 'Verification failed: $e';
+    }
+  }
+
+  Future<void> _completeLogin(String email, String token) async {
+    _email = email;
     _isGuest = false;
-    await _prefs.setString(_keyUserEmail, _email!);
+    _pendingEmail = null;
+    await _prefs.setString(_keyUserEmail, email);
+    await _prefs.setString(_keySessionToken, token);
     await _prefs.setBool(_keyIsGuest, false);
     notifyListeners();
-    return null;
+  }
+
+  void resetOtpFlow() {
+    _pendingEmail = null;
+    notifyListeners();
   }
 
   Future<void> continueAsGuest() async {
@@ -175,14 +257,16 @@ class AuthController extends ChangeNotifier {
   Future<void> signOut() async {
     _email = null;
     _isGuest = false;
+    _pendingEmail = null;
     await _prefs.remove(_keyUserEmail);
+    await _prefs.remove(_keySessionToken);
     await _prefs.setBool(_keyIsGuest, false);
     notifyListeners();
   }
 }
 
 // ============================================================================
-// AUDIO & YOUTUBE STREAM CONTROLLER
+// RESILIENT PLAYER & SEARCH CONTROLLER
 // ============================================================================
 class PlayerController extends ChangeNotifier {
   final YoutubeExplode _yt = YoutubeExplode();
@@ -200,6 +284,18 @@ class PlayerController extends ChangeNotifier {
 
   bool _isResolvingStream = false;
   String? _errorMessage;
+
+  static const List<String> _pipedInstances = [
+    'https://pipedapi.kavin.rocks',
+    'https://pipedapi.tokhmi.xyz',
+    'https://pipedapi.moomoo.me',
+  ];
+
+  static const List<String> _invidiousInstances = [
+    'https://inv.tux.pizza',
+    'https://invidious.nerdvpn.de',
+    'https://yewtu.be',
+  ];
 
   PlayerController() {
     _initPlayer();
@@ -244,24 +340,131 @@ class PlayerController extends ChangeNotifier {
   Future<List<TrackModel>> searchYouTube(String query) async {
     final trimmed = query.trim();
     if (trimmed.isEmpty) return [];
-    final searchList = await _yt.search.search(trimmed);
-    return searchList.map(TrackModel.fromVideo).toList();
+
+    final parsedId = VideoId.parseVideoId(trimmed);
+    if (parsedId != null) {
+      try {
+        final v = await _yt.videos.get(parsedId).timeout(const Duration(seconds: 10));
+        return [TrackModel.fromVideo(v)];
+      } catch (_) {}
+    }
+
+    try {
+      final searchList = await _yt.search
+          .search(trimmed)
+          .timeout(const Duration(seconds: 10));
+      if (searchList.isNotEmpty) {
+        return searchList.map(TrackModel.fromVideo).toList();
+      }
+    } catch (_) {}
+
+    for (final host in _pipedInstances) {
+      try {
+        final uri = Uri.parse(
+          '$host/search?q=${Uri.encodeQueryComponent(trimmed)}&filter=music_songs',
+        );
+        final res = await http.get(uri).timeout(const Duration(seconds: 8));
+        if (res.statusCode == 200) {
+          final data = jsonDecode(res.body) as Map<String, dynamic>;
+          final items = data['items'] as List<dynamic>? ?? [];
+          final tracks = <TrackModel>[];
+          for (final item in items) {
+            final map = item as Map<String, dynamic>;
+            final url = map['url'] as String? ?? '';
+            final id = url.replaceFirst('/watch?v=', '').trim();
+            if (id.isNotEmpty) {
+              tracks.add(
+                TrackModel(
+                  videoId: id,
+                  title: map['title'] as String? ?? 'Unknown Track',
+                  author: map['uploaderName'] as String? ?? 'Unknown Artist',
+                  thumbnailUrl: map['thumbnail'] as String? ??
+                      'https://i.ytimg.com/vi/$id/hqdefault.jpg',
+                  duration: Duration(
+                    seconds: (map['duration'] as num?)?.toInt() ?? 0,
+                  ),
+                ),
+              );
+            }
+          }
+          if (tracks.isNotEmpty) return tracks;
+        }
+      } catch (_) {}
+    }
+
+    for (final host in _invidiousInstances) {
+      try {
+        final uri = Uri.parse(
+          '$host/api/v1/search?q=${Uri.encodeQueryComponent(trimmed)}&type=video',
+        );
+        final res = await http.get(uri).timeout(const Duration(seconds: 8));
+        if (res.statusCode == 200) {
+          final items = jsonDecode(res.body) as List<dynamic>;
+          final tracks = <TrackModel>[];
+          for (final item in items) {
+            final map = item as Map<String, dynamic>;
+            final id = map['videoId'] as String? ?? '';
+            if (id.isNotEmpty) {
+              tracks.add(
+                TrackModel(
+                  videoId: id,
+                  title: map['title'] as String? ?? 'Unknown Track',
+                  author: map['author'] as String? ?? 'Unknown Artist',
+                  thumbnailUrl: 'https://i.ytimg.com/vi/$id/hqdefault.jpg',
+                  duration: Duration(
+                    seconds: (map['lengthSeconds'] as num?)?.toInt() ?? 0,
+                  ),
+                ),
+              );
+            }
+          }
+          if (tracks.isNotEmpty) return tracks;
+        }
+      } catch (_) {}
+    }
+
+    throw Exception('All search endpoints timed out.');
   }
 
   Future<Uri> _resolveAudioUri(String videoId) async {
     if (_resolvedUrlCache.containsKey(videoId)) {
       return _resolvedUrlCache[videoId]!;
     }
-    final manifest = await _yt.videos.streamsClient.getManifest(videoId);
-    final audioStreams = manifest.audioOnly;
-    if (audioStreams.isEmpty) {
-      throw StateError('No audio stream available for video $videoId');
+    try {
+      final manifest = await _yt.videos.streamsClient
+          .getManifest(videoId)
+          .timeout(const Duration(seconds: 12));
+      final audioStreams = manifest.audioOnly;
+      if (audioStreams.isNotEmpty) {
+        final sorted = audioStreams.sortByBitrate();
+        final selected = sorted.first;
+        _resolvedUrlCache[videoId] = selected.url;
+        return selected.url;
+      }
+    } catch (_) {}
+
+    for (final host in _pipedInstances) {
+      try {
+        final res = await http
+            .get(Uri.parse('$host/streams/$videoId'))
+            .timeout(const Duration(seconds: 8));
+        if (res.statusCode == 200) {
+          final data = jsonDecode(res.body) as Map<String, dynamic>;
+          final streams = data['audioStreams'] as List<dynamic>? ?? [];
+          if (streams.isNotEmpty) {
+            final streamMap = streams.first as Map<String, dynamic>;
+            final urlStr = streamMap['url'] as String?;
+            if (urlStr != null && urlStr.isNotEmpty) {
+              final uri = Uri.parse(urlStr);
+              _resolvedUrlCache[videoId] = uri;
+              return uri;
+            }
+          }
+        }
+      } catch (_) {}
     }
 
-    final sorted = audioStreams.sortByBitrate();
-    final selected = sorted.first;
-    _resolvedUrlCache[videoId] = selected.url;
-    return selected.url;
+    throw StateError('No playable audio stream found for $videoId');
   }
 
   AudioSource _buildAudioSource(TrackModel track, Uri streamUri) {
@@ -306,8 +509,7 @@ class PlayerController extends ChangeNotifier {
         unawaited(_player.play());
       }
     } catch (e) {
-      _errorMessage =
-          'Unable to play "${track.title}". Stream may be region-locked or restricted.';
+      _errorMessage = 'Unable to play "${track.title}". Stream restricted.';
     } finally {
       _isResolvingStream = false;
       notifyListeners();
@@ -341,9 +543,7 @@ class PlayerController extends ChangeNotifier {
 
   Future<void> toggleShuffle() async {
     final enabled = !_player.shuffleModeEnabled;
-    if (enabled) {
-      await _player.shuffle();
-    }
+    if (enabled) await _player.shuffle();
     await _player.setShuffleModeEnabled(enabled);
   }
 
@@ -359,7 +559,7 @@ class PlayerController extends ChangeNotifier {
   Future<void> shareTrack(TrackModel track) async {
     final shareToken = track.toShareToken();
     final message =
-        'Listen to "${track.title}" by ${track.author} on Spotube Edu!\n\n'
+        'Listen to "${track.title}" by ${track.author} on Sputube!\n\n'
         'YouTube: https://youtu.be/${track.videoId}\n'
         'Import Code:\n$shareToken';
     await Share.share(message, subject: track.title);
@@ -382,7 +582,6 @@ class PlayerController extends ChangeNotifier {
 // ============================================================================
 class MusicStreamApp extends StatefulWidget {
   final SharedPreferences prefs;
-
   const MusicStreamApp({super.key, required this.prefs});
 
   @override
@@ -410,22 +609,22 @@ class _MusicStreamAppState extends State<MusicStreamApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Spotube Edu',
+      title: 'Sputube',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
         scaffoldBackgroundColor: AppColors.background,
-        primaryColor: AppColors.spotifyGreen,
+        primaryColor: AppColors.primaryBlue,
         colorScheme: const ColorScheme.dark(
-          primary: AppColors.spotifyGreen,
-          secondary: AppColors.spotifyGreen,
+          primary: AppColors.primaryBlue,
+          secondary: AppColors.accentBlue,
           surface: AppColors.cardDark,
         ),
         sliderTheme: SliderThemeData(
-          activeTrackColor: AppColors.spotifyGreen,
+          activeTrackColor: AppColors.primaryBlue,
           inactiveTrackColor: Colors.white24,
           thumbColor: Colors.white,
-          overlayColor: AppColors.spotifyGreen.withOpacity(0.2),
+          overlayColor: AppColors.primaryBlue.withOpacity(0.2),
           trackHeight: 3.0,
         ),
         snackBarTheme: const SnackBarThemeData(
@@ -454,7 +653,6 @@ class _MusicStreamAppState extends State<MusicStreamApp> {
 // ============================================================================
 class AuthScreen extends StatefulWidget {
   final AuthController authController;
-
   const AuthScreen({super.key, required this.authController});
 
   @override
@@ -463,159 +661,196 @@ class AuthScreen extends StatefulWidget {
 
 class _AuthScreenState extends State<AuthScreen> {
   final TextEditingController _emailCtrl = TextEditingController();
-  final TextEditingController _passwordCtrl = TextEditingController();
-  bool _isSignUp = false;
+  final TextEditingController _otpCtrl = TextEditingController();
   String? _error;
+  String? _statusMessage;
   bool _submitting = false;
 
   @override
   void dispose() {
     _emailCtrl.dispose();
-    _passwordCtrl.dispose();
+    _otpCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _submit() async {
+  Future<void> _sendOtp() async {
+    setState(() {
+      _submitting = true;
+      _error = null;
+      _statusMessage = null;
+    });
+
+    final res = await widget.authController.requestEmailOtp(_emailCtrl.text);
+    if (!mounted) return;
+
+    setState(() {
+      _submitting = false;
+      if (res.success) {
+        _statusMessage = res.message;
+      } else {
+        _error = res.message;
+      }
+    });
+  }
+
+  Future<void> _verifyOtp() async {
     setState(() {
       _submitting = true;
       _error = null;
     });
 
-    final err = await widget.authController.signIn(
-      email: _emailCtrl.text,
-      password: _passwordCtrl.text,
-      isSignUp: _isSignUp,
-    );
+    final err = await widget.authController.verifyEmailOtp(_otpCtrl.text);
+    if (!mounted) return;
 
-    if (mounted) {
-      setState(() {
-        _submitting = false;
-        _error = err;
-      });
-    }
+    setState(() {
+      _submitting = false;
+      _error = err;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 400),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.graphic_eq_rounded, size: 76, color: AppColors.spotifyGreen),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Millions of songs.\nStreamed cleanly.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: AppColors.textPrimary, height: 1.2),
+    return ListenableBuilder(
+      listenable: widget.authController,
+      builder: (context, _) {
+        final awaitingOtp = widget.authController.pendingEmail != null;
+
+        return Scaffold(
+          body: SafeArea(
+            child: Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 400),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.headphones_rounded, size: 76, color: AppColors.primaryBlue),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'Sputube\nStream in Blue.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: AppColors.textPrimary, height: 1.2),
+                      ),
+                      const SizedBox(height: 28),
+                      Container(
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          color: AppColors.cardDark,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Text(
+                              awaitingOtp ? 'Enter Inbox 6-Digit OTP' : 'Sign In with Email OTP',
+                              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              awaitingOtp
+                                  ? 'Check your email inbox for the code sent to ${widget.authController.pendingEmail}'
+                                  : 'Secure OTP authentication for Sputube.',
+                              style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                            ),
+                            const SizedBox(height: 16),
+                            if (!awaitingOtp)
+                              TextField(
+                                controller: _emailCtrl,
+                                keyboardType: TextInputType.emailAddress,
+                                decoration: InputDecoration(
+                                  labelText: 'Your Email Address',
+                                  prefixIcon: const Icon(Icons.email_outlined, color: AppColors.primaryBlue),
+                                  filled: true,
+                                  fillColor: AppColors.cardElevated,
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                                ),
+                              )
+                            else
+                              TextField(
+                                controller: _otpCtrl,
+                                keyboardType: TextInputType.number,
+                                maxLength: 6,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(fontSize: 24, letterSpacing: 8, fontWeight: FontWeight.bold),
+                                decoration: InputDecoration(
+                                  counterText: '',
+                                  hintText: '••••••',
+                                  filled: true,
+                                  fillColor: AppColors.cardElevated,
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                                ),
+                              ),
+                            if (_statusMessage != null) ...[
+                              const SizedBox(height: 12),
+                              Text(_statusMessage!, style: const TextStyle(color: AppColors.accentBlue, fontSize: 13)),
+                            ],
+                            if (_error != null) ...[
+                              const SizedBox(height: 12),
+                              Text(_error!, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
+                            ],
+                            const SizedBox(height: 20),
+                            ElevatedButton(
+                              onPressed: _submitting ? null : (awaitingOtp ? _verifyOtp : _sendOtp),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: AppColors.primaryBlue,
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(vertical: 15),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                              ),
+                              child: Text(
+                                awaitingOtp ? 'VERIFY & LOGIN' : 'SEND 6-DIGIT OTP',
+                                style: const TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.1),
+                              ),
+                            ),
+                            if (awaitingOtp) ...[
+                              const SizedBox(height: 8),
+                              TextButton(
+                                onPressed: () {
+                                  _otpCtrl.clear();
+                                  _error = null;
+                                  _statusMessage = null;
+                                  widget.authController.resetOtpFlow();
+                                },
+                                child: const Text('Change email or resend OTP', style: TextStyle(color: AppColors.textSecondary)),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      OutlinedButton.icon(
+                        onPressed: widget.authController.continueAsGuest,
+                        icon: const Icon(Icons.person_outline),
+                        label: const Text('CONTINUE AS GUEST'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: AppColors.textPrimary,
+                          side: const BorderSide(color: Colors.white24),
+                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 32),
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: AppColors.cardDark,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.white10),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Text(
-                          _isSignUp ? 'Create Account' : 'Sign In',
-                          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-                        ),
-                        const SizedBox(height: 16),
-                        TextField(
-                          controller: _emailCtrl,
-                          keyboardType: TextInputType.emailAddress,
-                          decoration: InputDecoration(
-                            labelText: 'Email address',
-                            filled: true,
-                            fillColor: AppColors.cardElevated,
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        TextField(
-                          controller: _passwordCtrl,
-                          obscureText: true,
-                          decoration: InputDecoration(
-                            labelText: 'Password',
-                            filled: true,
-                            fillColor: AppColors.cardElevated,
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-                          ),
-                        ),
-                        if (_error != null) ...[
-                          const SizedBox(height: 12),
-                          Text(_error!, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
-                        ],
-                        const SizedBox(height: 20),
-                        ElevatedButton(
-                          onPressed: _submitting ? null : _submit,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: AppColors.spotifyGreen,
-                            foregroundColor: Colors.black,
-                            padding: const EdgeInsets.symmetric(vertical: 15),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                          ),
-                          child: Text(
-                            _isSignUp ? 'SIGN UP' : 'LOG IN',
-                            style: const TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.1),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        TextButton(
-                          onPressed: () => setState(() {
-                            _isSignUp = !_isSignUp;
-                            _error = null;
-                          }),
-                          child: Text(
-                            _isSignUp ? 'Already have an account? Log in' : "Don't have an account? Sign up",
-                            style: const TextStyle(color: AppColors.textSecondary),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  OutlinedButton.icon(
-                    onPressed: widget.authController.continueAsGuest,
-                    icon: const Icon(Icons.person_outline),
-                    label: const Text('CONTINUE AS GUEST'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: AppColors.textPrimary,
-                      side: const BorderSide(color: Colors.white24),
-                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
+
 // ============================================================================
-// HOME / SEARCH & BROWSE SCREEN
+// HOME & SEARCH SCREEN
 // ============================================================================
 class HomeScreen extends StatefulWidget {
   final AuthController authController;
   final PlayerController playerController;
 
-  const HomeScreen({
-    super.key,
-    required this.authController,
-    required this.playerController,
-  });
+  const HomeScreen({super.key, required this.authController, required this.playerController});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -631,10 +866,10 @@ class _HomeScreenState extends State<HomeScreen> {
   static const List<String> _quickCategories = [
     'Synthwave Chill',
     'Lo-Fi Beats',
-    'Acoustic Sessions',
-    'Indie Pop Hits',
+    'Bollywood Hits',
+    'Arijit Singh',
     'Electronic Focus',
-    'Classical Piano',
+    'Acoustic Sessions',
   ];
 
   @override
@@ -662,10 +897,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _onSearchChanged(String value) {
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 500), () {
-      if (value.trim().isNotEmpty) {
-        _performSearch(value);
-      }
+    _debounce = Timer(const Duration(milliseconds: 550), () {
+      if (value.trim().isNotEmpty) _performSearch(value);
     });
   }
 
@@ -686,7 +919,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) {
         setState(() {
           _isSearching = false;
-          _searchError = 'Search failed. Check your internet connection.';
+          _searchError = 'Search servers busy. Tap Retry or paste a YouTube link.';
         });
       }
     }
@@ -699,23 +932,18 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (ctx) => AlertDialog(
         backgroundColor: AppColors.cardElevated,
         title: const Text('Import Shared Track'),
-        content: TextField(
-          controller: ctrl,
-          decoration: const InputDecoration(hintText: 'Paste spotube://track/... code'),
-        ),
+        content: TextField(controller: ctrl, decoration: const InputDecoration(hintText: 'Paste sputube://track/... code')),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CANCEL')),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.spotifyGreen, foregroundColor: Colors.black),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.primaryBlue, foregroundColor: Colors.white),
             onPressed: () {
               final track = TrackModel.fromShareToken(ctrl.text);
               Navigator.pop(ctx);
               if (track != null) {
                 widget.playerController.playTrack(track);
               } else {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Invalid share token.')),
-                );
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Invalid share token.')));
               }
             },
             child: const Text('PLAY'),
@@ -752,33 +980,21 @@ class _HomeScreenState extends State<HomeScreen> {
         elevation: 0,
         title: Row(
           children: [
-            const Icon(Icons.album_rounded, color: AppColors.spotifyGreen),
-            const SizedBox(width: 10),
+            const Icon(Icons.waves_rounded, color: AppColors.primaryBlue, size: 24),
+            const SizedBox(width: 8),
             Expanded(
               child: Text(
-                'Good day, ${widget.authController.displayName}',
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                'Sputube • ${widget.authController.displayName}',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
         ),
         actions: [
-          IconButton(
-            tooltip: 'Import Shared Track',
-            icon: const Icon(Icons.qr_code_scanner_rounded),
-            onPressed: _showImportShareDialog,
-          ),
-          IconButton(
-            tooltip: 'Queue',
-            icon: const Icon(Icons.queue_music_rounded),
-            onPressed: _openQueueSheet,
-          ),
-          IconButton(
-            tooltip: 'Log out',
-            icon: const Icon(Icons.logout_rounded),
-            onPressed: widget.authController.signOut,
-          ),
+          IconButton(icon: const Icon(Icons.qr_code_scanner_rounded), onPressed: _showImportShareDialog),
+          IconButton(icon: const Icon(Icons.queue_music_rounded), onPressed: _openQueueSheet),
+          IconButton(icon: const Icon(Icons.logout_rounded), onPressed: widget.authController.signOut),
         ],
       ),
       body: Column(
@@ -791,18 +1007,16 @@ class _HomeScreenState extends State<HomeScreen> {
               onSubmitted: _performSearch,
               style: const TextStyle(color: Colors.black),
               decoration: InputDecoration(
-                hintText: 'What do you want to listen to?',
+                hintText: 'Search songs or paste YouTube URL...',
                 hintStyle: const TextStyle(color: Colors.black54),
                 prefixIcon: const Icon(Icons.search, color: Colors.black87),
-                suffixIcon: _searchCtrl.text.isNotEmpty
-                    ? IconButton(
-                        icon: const Icon(Icons.clear, color: Colors.black87),
-                        onPressed: () {
-                          _searchCtrl.clear();
-                          setState(() {});
-                        },
-                      )
-                    : null,
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.clear, color: Colors.black87),
+                  onPressed: () {
+                    _searchCtrl.clear();
+                    setState(() {});
+                  },
+                ),
                 filled: true,
                 fillColor: Colors.white,
                 contentPadding: const EdgeInsets.symmetric(vertical: 0),
@@ -834,20 +1048,28 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(height: 8),
           ListenableBuilder(
             listenable: widget.playerController,
-            builder: (context, _) {
-              if (!widget.playerController.isResolvingStream) return const SizedBox.shrink();
-              return const LinearProgressIndicator(
-                color: AppColors.spotifyGreen,
-                backgroundColor: AppColors.cardElevated,
-                minHeight: 2,
-              );
-            },
+            builder: (context, _) => widget.playerController.isResolvingStream
+                ? const LinearProgressIndicator(color: AppColors.primaryBlue, backgroundColor: AppColors.cardElevated, minHeight: 2)
+                : const SizedBox.shrink(),
           ),
           Expanded(
             child: _isSearching
-                ? const Center(child: CircularProgressIndicator(color: AppColors.spotifyGreen))
+                ? const Center(child: CircularProgressIndicator(color: AppColors.primaryBlue))
                 : _searchError != null
-                    ? Center(child: Text(_searchError!, style: const TextStyle(color: AppColors.textSecondary)))
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(_searchError!, style: const TextStyle(color: AppColors.textSecondary)),
+                            const SizedBox(height: 12),
+                            ElevatedButton(
+                              style: ElevatedButton.styleFrom(backgroundColor: AppColors.primaryBlue, foregroundColor: Colors.white),
+                              onPressed: () => _performSearch(_searchCtrl.text.isEmpty ? 'Lo-Fi Beats' : _searchCtrl.text),
+                              child: const Text('RETRY SEARCH'),
+                            ),
+                          ],
+                        ),
+                      )
                     : ListView.builder(
                         padding: const EdgeInsets.only(bottom: 16),
                         itemCount: _results.length,
@@ -862,11 +1084,7 @@ class _HomeScreenState extends State<HomeScreen> {
             builder: (context, _) {
               final current = widget.playerController.currentTrack;
               if (current == null) return const SizedBox.shrink();
-              return MiniPlayerBar(
-                track: current,
-                playerController: widget.playerController,
-                onTap: _openFullScreenPlayer,
-              );
+              return MiniPlayerBar(track: current, playerController: widget.playerController, onTap: _openFullScreenPlayer);
             },
           ),
         ],
@@ -876,7 +1094,7 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 // ============================================================================
-// TRACK LIST TILE
+// UI COMPONENTS
 // ============================================================================
 class TrackTile extends StatelessWidget {
   final TrackModel track;
@@ -918,7 +1136,7 @@ class TrackTile extends StatelessWidget {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              color: isCurrent ? AppColors.spotifyGreen : AppColors.textPrimary,
+              color: isCurrent ? AppColors.accentBlue : AppColors.textPrimary,
               fontWeight: isCurrent ? FontWeight.bold : FontWeight.w500,
               fontSize: 15,
             ),
@@ -973,9 +1191,6 @@ class TrackTile extends StatelessWidget {
   }
 }
 
-// ============================================================================
-// PERSISTENT MINI-PLAYER BAR
-// ============================================================================
 class MiniPlayerBar extends StatelessWidget {
   final TrackModel track;
   final PlayerController playerController;
@@ -1067,7 +1282,7 @@ class MiniPlayerBar extends StatelessWidget {
                     value: progress,
                     minHeight: 2.5,
                     backgroundColor: Colors.white12,
-                    valueColor: const AlwaysStoppedAnimation<Color>(AppColors.spotifyGreen),
+                    valueColor: const AlwaysStoppedAnimation<Color>(AppColors.primaryBlue),
                   ),
                 );
               },
@@ -1079,9 +1294,6 @@ class MiniPlayerBar extends StatelessWidget {
   }
 }
 
-// ============================================================================
-// FULL-SCREEN PLAYER MODAL
-// ============================================================================
 class FullScreenPlayerModal extends StatelessWidget {
   final PlayerController playerController;
 
@@ -1108,7 +1320,7 @@ class FullScreenPlayerModal extends StatelessWidget {
             gradient: LinearGradient(
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
-              colors: [Color(0xFF2C3E35), AppColors.background, AppColors.background],
+              colors: [Color(0xFF102A45), AppColors.background, AppColors.background],
             ),
             borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
           ),
@@ -1153,7 +1365,7 @@ class FullScreenPlayerModal extends StatelessWidget {
                   ),
                 ),
               ),
-                            const Spacer(),
+              const Spacer(),
               Row(
                 children: [
                   Expanded(
@@ -1232,7 +1444,7 @@ class FullScreenPlayerModal extends StatelessWidget {
                   IconButton(
                     icon: Icon(
                       Icons.shuffle_rounded,
-                      color: player.shuffleModeEnabled ? AppColors.spotifyGreen : AppColors.textSecondary,
+                      color: player.shuffleModeEnabled ? AppColors.accentBlue : AppColors.textSecondary,
                     ),
                     onPressed: playerController.toggleShuffle,
                   ),
@@ -1244,10 +1456,10 @@ class FullScreenPlayerModal extends StatelessWidget {
                   Container(
                     width: 68,
                     height: 68,
-                    decoration: const BoxDecoration(color: AppColors.spotifyGreen, shape: BoxShape.circle),
+                    decoration: const BoxDecoration(color: AppColors.primaryBlue, shape: BoxShape.circle),
                     child: IconButton(
                       iconSize: 38,
-                      color: Colors.black,
+                      color: Colors.white,
                       icon: Icon(player.playing ? Icons.pause_rounded : Icons.play_arrow_rounded),
                       onPressed: playerController.togglePlayPause,
                     ),
@@ -1260,7 +1472,7 @@ class FullScreenPlayerModal extends StatelessWidget {
                   IconButton(
                     icon: Icon(
                       player.loopMode == LoopMode.one ? Icons.repeat_one_rounded : Icons.repeat_rounded,
-                      color: player.loopMode != LoopMode.off ? AppColors.spotifyGreen : AppColors.textSecondary,
+                      color: player.loopMode != LoopMode.off ? AppColors.accentBlue : AppColors.textSecondary,
                     ),
                     onPressed: playerController.cycleLoopMode,
                   ),
@@ -1300,9 +1512,6 @@ class FullScreenPlayerModal extends StatelessWidget {
   }
 }
 
-// ============================================================================
-// QUEUE VIEWER BOTTOM SHEET
-// ============================================================================
 class QueueSheet extends StatelessWidget {
   final PlayerController playerController;
 
@@ -1326,7 +1535,7 @@ class QueueSheet extends StatelessWidget {
                   padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
                   child: Row(
                     children: [
-                      Icon(Icons.queue_music, color: AppColors.spotifyGreen),
+                      Icon(Icons.queue_music, color: AppColors.primaryBlue),
                       SizedBox(width: 10),
                       Text('Playback Queue', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                     ],
@@ -1352,14 +1561,14 @@ class QueueSheet extends StatelessWidget {
                         return ListTile(
                           leading: Icon(
                             isPlaying ? Icons.equalizer_rounded : Icons.music_note_rounded,
-                            color: isPlaying ? AppColors.spotifyGreen : AppColors.textSecondary,
+                            color: isPlaying ? AppColors.accentBlue : AppColors.textSecondary,
                           ),
                           title: Text(
                             item.title,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              color: isPlaying ? AppColors.spotifyGreen : AppColors.textPrimary,
+                              color: isPlaying ? AppColors.accentBlue : AppColors.textPrimary,
                               fontWeight: isPlaying ? FontWeight.bold : FontWeight.normal,
                             ),
                           ),
