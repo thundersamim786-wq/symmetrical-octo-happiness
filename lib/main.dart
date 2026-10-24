@@ -22,19 +22,6 @@ Future<void> main() async {
 }
 
 // ============================================================================
-// CONFIGURATION (SUPABASE OTP)
-// ============================================================================
-class OtpConfig {
-  static const String supabaseUrl = 'https://vrmhtsvdezrvaoaynpkc.supabase.co';
-  static const String supabaseAnonKey = 'Sb_publishable_ScnsuOMIXGGYw0l7OSot6w__Bcf1nxX';
-
-  static bool get isSupabaseConfigured =>
-      supabaseUrl.isNotEmpty && 
-      supabaseUrl != 'https://YOUR_PROJECT_ID.supabase.co' && 
-      supabaseAnonKey.isNotEmpty;
-}
-
-// ============================================================================
 // THEME CONSTANTS (BLUE THEME AESTHETIC)
 // ============================================================================
 class AppColors {
@@ -120,17 +107,15 @@ class PositionData {
 }
 
 // ============================================================================
-// AUTHENTICATION CONTROLLER (SUPABASE EMAIL OTP)
+// AUTHENTICATION CONTROLLER (SIMPLE EMAIL / GUEST)
 // ============================================================================
 class AuthController extends ChangeNotifier {
   static const String _keyUserEmail = 'auth_user_email';
-  static const String _keySessionToken = 'auth_session_token';
   static const String _keyIsGuest = 'auth_is_guest';
 
   final SharedPreferences _prefs;
   String? _email;
   bool _isGuest = false;
-  String? _pendingEmail;
 
   AuthController(this._prefs) {
     _email = _prefs.getString(_keyUserEmail);
@@ -140,110 +125,19 @@ class AuthController extends ChangeNotifier {
   bool get isAuthenticated => (_email != null && _email!.isNotEmpty) || _isGuest;
   bool get isGuest => _isGuest;
   String get displayName => _isGuest ? 'Guest Listener' : (_email ?? 'User');
-  String? get pendingEmail => _pendingEmail;
 
-  Future<({bool success, String message})> requestEmailOtp(String email) async {
+  Future<String?> signInWithEmail(String email) async {
     final cleanEmail = email.trim().toLowerCase();
     if (!cleanEmail.contains('@') || !cleanEmail.contains('.')) {
-      return (success: false, message: 'Please enter a valid email address.');
+      return 'Please enter a valid email address.';
     }
 
-    if (!OtpConfig.isSupabaseConfigured) {
-      return (
-        success: false,
-        message: 'Supabase URL is not properly configured.'
-      );
-    }
-
-    try {
-      final uri = Uri.parse('${OtpConfig.supabaseUrl}/auth/v1/otp');
-      final response = await http
-          .post(
-            uri,
-            headers: {
-              'apikey': OtpConfig.supabaseAnonKey,
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode({
-              'email': cleanEmail,
-              'create_user': true,
-            }),
-          )
-          .timeout(const Duration(seconds: 12));
-
-      if (response.statusCode >= 200 && response.statusCode < 300) {
-        _pendingEmail = cleanEmail;
-        notifyListeners();
-        return (
-          success: true,
-          message: 'A secure 6-digit OTP has been emailed to $cleanEmail.'
-        );
-      } else {
-        return (
-          success: false,
-          message: 'Supabase error: ${response.body}'
-        );
-      }
-    } catch (e) {
-      return (
-        success: false,
-        message: 'Network error connecting to auth server: $e'
-      );
-    }
-  }
-
-  Future<String?> verifyEmailOtp(String enteredOtp) async {
-    final code = enteredOtp.trim();
-    if (_pendingEmail == null) return 'Request an OTP first.';
-    if (code.length != 6) return 'Enter the full 6-digit OTP code.';
-
-    if (!OtpConfig.isSupabaseConfigured) {
-      return 'Supabase URL is not configured.';
-    }
-
-    try {
-      final uri = Uri.parse('${OtpConfig.supabaseUrl}/auth/v1/verify');
-      final response = await http
-          .post(
-            uri,
-            headers: {
-              'apikey': OtpConfig.supabaseAnonKey,
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode({
-              'type': 'email',
-              'email': _pendingEmail,
-              'token': code,
-            }),
-          )
-          .timeout(const Duration(seconds: 12));
-
-      if (response.statusCode >= 200 && response.statusCode < 300) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        final accessToken = data['access_token'] as String? ?? 'verified';
-        await _completeLogin(_pendingEmail!, accessToken);
-        return null;
-      } else {
-        return 'Invalid or expired OTP code.';
-      }
-    } catch (e) {
-      return 'Verification failed: $e';
-    }
-  }
-
-  Future<void> _completeLogin(String email, String token) async {
-    _email = email;
+    _email = cleanEmail;
     _isGuest = false;
-    _pendingEmail = null;
-    await _prefs.setString(_keyUserEmail, email);
-    await _prefs.setString(_keySessionToken, token);
+    await _prefs.setString(_keyUserEmail, cleanEmail);
     await _prefs.setBool(_keyIsGuest, false);
     notifyListeners();
-  }
-
-  void resetOtpFlow() {
-    _pendingEmail = null;
-    notifyListeners();
+    return null;
   }
 
   Future<void> continueAsGuest() async {
@@ -257,16 +151,14 @@ class AuthController extends ChangeNotifier {
   Future<void> signOut() async {
     _email = null;
     _isGuest = false;
-    _pendingEmail = null;
     await _prefs.remove(_keyUserEmail);
-    await _prefs.remove(_keySessionToken);
     await _prefs.setBool(_keyIsGuest, false);
     notifyListeners();
   }
 }
 
 // ============================================================================
-// RESILIENT PLAYER & SEARCH CONTROLLER
+// RESILIENT PLAYER & SEARCH CONTROLLER (BYPASSES STREAM RESTRICTIONS)
 // ============================================================================
 class PlayerController extends ChangeNotifier {
   final YoutubeExplode _yt = YoutubeExplode();
@@ -289,6 +181,7 @@ class PlayerController extends ChangeNotifier {
     'https://pipedapi.kavin.rocks',
     'https://pipedapi.tokhmi.xyz',
     'https://pipedapi.moomoo.me',
+    'https://pipedapi.privacy.com.de',
   ];
 
   static const List<String> _invidiousInstances = [
@@ -349,21 +242,12 @@ class PlayerController extends ChangeNotifier {
       } catch (_) {}
     }
 
-    try {
-      final searchList = await _yt.search
-          .search(trimmed)
-          .timeout(const Duration(seconds: 10));
-      if (searchList.isNotEmpty) {
-        return searchList.map(TrackModel.fromVideo).toList();
-      }
-    } catch (_) {}
-
     for (final host in _pipedInstances) {
       try {
         final uri = Uri.parse(
           '$host/search?q=${Uri.encodeQueryComponent(trimmed)}&filter=music_songs',
         );
-        final res = await http.get(uri).timeout(const Duration(seconds: 8));
+        final res = await http.get(uri).timeout(const Duration(seconds: 6));
         if (res.statusCode == 200) {
           final data = jsonDecode(res.body) as Map<String, dynamic>;
           final items = data['items'] as List<dynamic>? ?? [];
@@ -392,36 +276,14 @@ class PlayerController extends ChangeNotifier {
       } catch (_) {}
     }
 
-    for (final host in _invidiousInstances) {
-      try {
-        final uri = Uri.parse(
-          '$host/api/v1/search?q=${Uri.encodeQueryComponent(trimmed)}&type=video',
-        );
-        final res = await http.get(uri).timeout(const Duration(seconds: 8));
-        if (res.statusCode == 200) {
-          final items = jsonDecode(res.body) as List<dynamic>;
-          final tracks = <TrackModel>[];
-          for (final item in items) {
-            final map = item as Map<String, dynamic>;
-            final id = map['videoId'] as String? ?? '';
-            if (id.isNotEmpty) {
-              tracks.add(
-                TrackModel(
-                  videoId: id,
-                  title: map['title'] as String? ?? 'Unknown Track',
-                  author: map['author'] as String? ?? 'Unknown Artist',
-                  thumbnailUrl: 'https://i.ytimg.com/vi/$id/hqdefault.jpg',
-                  duration: Duration(
-                    seconds: (map['lengthSeconds'] as num?)?.toInt() ?? 0,
-                  ),
-                ),
-              );
-            }
-          }
-          if (tracks.isNotEmpty) return tracks;
-        }
-      } catch (_) {}
-    }
+    try {
+      final searchList = await _yt.search
+          .search(trimmed)
+          .timeout(const Duration(seconds: 10));
+      if (searchList.isNotEmpty) {
+        return searchList.map(TrackModel.fromVideo).toList();
+      }
+    } catch (_) {}
 
     throw Exception('All search endpoints timed out.');
   }
@@ -430,24 +292,13 @@ class PlayerController extends ChangeNotifier {
     if (_resolvedUrlCache.containsKey(videoId)) {
       return _resolvedUrlCache[videoId]!;
     }
-    try {
-      final manifest = await _yt.videos.streamsClient
-          .getManifest(videoId)
-          .timeout(const Duration(seconds: 12));
-      final audioStreams = manifest.audioOnly;
-      if (audioStreams.isNotEmpty) {
-        final sorted = audioStreams.sortByBitrate();
-        final selected = sorted.first;
-        _resolvedUrlCache[videoId] = selected.url;
-        return selected.url;
-      }
-    } catch (_) {}
 
+    // 1. Try Piped Proxied Stream First (bypasses YouTube server restriction)
     for (final host in _pipedInstances) {
       try {
         final res = await http
             .get(Uri.parse('$host/streams/$videoId'))
-            .timeout(const Duration(seconds: 8));
+            .timeout(const Duration(seconds: 7));
         if (res.statusCode == 200) {
           final data = jsonDecode(res.body) as Map<String, dynamic>;
           final streams = data['audioStreams'] as List<dynamic>? ?? [];
@@ -464,7 +315,45 @@ class PlayerController extends ChangeNotifier {
       } catch (_) {}
     }
 
-    throw StateError('No playable audio stream found for $videoId');
+    // 2. Fallback to Invidious proxy stream
+    for (final host in _invidiousInstances) {
+      try {
+        final res = await http
+            .get(Uri.parse('$host/api/v1/videos/$videoId'))
+            .timeout(const Duration(seconds: 7));
+        if (res.statusCode == 200) {
+          final data = jsonDecode(res.body) as Map<String, dynamic>;
+          final adaptiveFormats = data['adaptiveFormats'] as List<dynamic>? ?? [];
+          for (final fmt in adaptiveFormats) {
+            final type = fmt['type'] as String? ?? '';
+            if (type.contains('audio')) {
+              final urlStr = fmt['url'] as String?;
+              if (urlStr != null && urlStr.isNotEmpty) {
+                final uri = Uri.parse(urlStr);
+                _resolvedUrlCache[videoId] = uri;
+                return uri;
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 3. Fallback to direct YoutubeExplode manifest
+    try {
+      final manifest = await _yt.videos.streamsClient
+          .getManifest(videoId)
+          .timeout(const Duration(seconds: 10));
+      final audioStreams = manifest.audioOnly;
+      if (audioStreams.isNotEmpty) {
+        final sorted = audioStreams.sortByBitrate();
+        final selected = sorted.first;
+        _resolvedUrlCache[videoId] = selected.url;
+        return selected.url;
+      }
+    } catch (_) {}
+
+    throw StateError('This track is restricted or unavailable for streaming.');
   }
 
   AudioSource _buildAudioSource(TrackModel track, Uri streamUri) {
@@ -472,7 +361,7 @@ class PlayerController extends ChangeNotifier {
       streamUri,
       tag: MediaItem(
         id: track.videoId,
-        album: 'YouTube Audio Stream',
+        album: 'Sputube Audio Stream',
         title: track.title,
         artist: track.author,
         duration: track.duration,
@@ -509,7 +398,7 @@ class PlayerController extends ChangeNotifier {
         unawaited(_player.play());
       }
     } catch (e) {
-      _errorMessage = 'Unable to play "${track.title}". Stream restricted.';
+      _errorMessage = 'Unable to play "${track.title}". Track is restricted.';
     } finally {
       _isResolvingStream = false;
       notifyListeners();
@@ -649,7 +538,7 @@ class _MusicStreamAppState extends State<MusicStreamApp> {
 }
 
 // ============================================================================
-// AUTH SCREEN
+// AUTH SCREEN (NO PASSWORD / SIMPLE LOGIN)
 // ============================================================================
 class AuthScreen extends StatefulWidget {
   final AuthController authController;
@@ -661,45 +550,22 @@ class AuthScreen extends StatefulWidget {
 
 class _AuthScreenState extends State<AuthScreen> {
   final TextEditingController _emailCtrl = TextEditingController();
-  final TextEditingController _otpCtrl = TextEditingController();
   String? _error;
-  String? _statusMessage;
   bool _submitting = false;
 
   @override
   void dispose() {
     _emailCtrl.dispose();
-    _otpCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _sendOtp() async {
-    setState(() {
-      _submitting = true;
-      _error = null;
-      _statusMessage = null;
-    });
-
-    final res = await widget.authController.requestEmailOtp(_emailCtrl.text);
-    if (!mounted) return;
-
-    setState(() {
-      _submitting = false;
-      if (res.success) {
-        _statusMessage = res.message;
-      } else {
-        _error = res.message;
-      }
-    });
-  }
-
-  Future<void> _verifyOtp() async {
+  Future<void> _submit() async {
     setState(() {
       _submitting = true;
       _error = null;
     });
 
-    final err = await widget.authController.verifyEmailOtp(_otpCtrl.text);
+    final err = await widget.authController.signInWithEmail(_emailCtrl.text);
     if (!mounted) return;
 
     setState(() {
@@ -710,135 +576,94 @@ class _AuthScreenState extends State<AuthScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: widget.authController,
-      builder: (context, _) {
-        final awaitingOtp = widget.authController.pendingEmail != null;
-
-        return Scaffold(
-          body: SafeArea(
-            child: Center(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 400),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.headphones_rounded, size: 76, color: AppColors.primaryBlue),
-                      const SizedBox(height: 16),
-                      const Text(
-                        'Sputube\nStream in Blue.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: AppColors.textPrimary, height: 1.2),
-                      ),
-                      const SizedBox(height: 28),
-                      Container(
-                        padding: const EdgeInsets.all(20),
-                        decoration: BoxDecoration(
-                          color: AppColors.cardDark,
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.white10),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            Text(
-                              awaitingOtp ? 'Enter Inbox 6-Digit OTP' : 'Sign In with Email OTP',
-                              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              awaitingOtp
-                                  ? 'Check your email inbox for the code sent to ${widget.authController.pendingEmail}'
-                                  : 'Secure OTP authentication for Sputube.',
-                              style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
-                            ),
-                            const SizedBox(height: 16),
-                            if (!awaitingOtp)
-                              TextField(
-                                controller: _emailCtrl,
-                                keyboardType: TextInputType.emailAddress,
-                                decoration: InputDecoration(
-                                  labelText: 'Your Email Address',
-                                  prefixIcon: const Icon(Icons.email_outlined, color: AppColors.primaryBlue),
-                                  filled: true,
-                                  fillColor: AppColors.cardElevated,
-                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-                                ),
-                              )
-                            else
-                              TextField(
-                                controller: _otpCtrl,
-                                keyboardType: TextInputType.number,
-                                maxLength: 6,
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(fontSize: 24, letterSpacing: 8, fontWeight: FontWeight.bold),
-                                decoration: InputDecoration(
-                                  counterText: '',
-                                  hintText: '••••••',
-                                  filled: true,
-                                  fillColor: AppColors.cardElevated,
-                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-                                ),
-                              ),
-                            if (_statusMessage != null) ...[
-                              const SizedBox(height: 12),
-                              Text(_statusMessage!, style: const TextStyle(color: AppColors.accentBlue, fontSize: 13)),
-                            ],
-                            if (_error != null) ...[
-                              const SizedBox(height: 12),
-                              Text(_error!, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
-                            ],
-                            const SizedBox(height: 20),
-                            ElevatedButton(
-                              onPressed: _submitting ? null : (awaitingOtp ? _verifyOtp : _sendOtp),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: AppColors.primaryBlue,
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(vertical: 15),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                              ),
-                              child: Text(
-                                awaitingOtp ? 'VERIFY & LOGIN' : 'SEND 6-DIGIT OTP',
-                                style: const TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.1),
-                              ),
-                            ),
-                            if (awaitingOtp) ...[
-                              const SizedBox(height: 8),
-                              TextButton(
-                                onPressed: () {
-                                  _otpCtrl.clear();
-                                  _error = null;
-                                  _statusMessage = null;
-                                  widget.authController.resetOtpFlow();
-                                },
-                                child: const Text('Change email or resend OTP', style: TextStyle(color: AppColors.textSecondary)),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      OutlinedButton.icon(
-                        onPressed: widget.authController.continueAsGuest,
-                        icon: const Icon(Icons.person_outline),
-                        label: const Text('CONTINUE AS GUEST'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: AppColors.textPrimary,
-                          side: const BorderSide(color: Colors.white24),
-                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                        ),
-                      ),
-                    ],
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 400),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.headphones_rounded, size: 76, color: AppColors.primaryBlue),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Sputube\nStream in Blue.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: AppColors.textPrimary, height: 1.2),
                   ),
-                ),
+                  const SizedBox(height: 28),
+                  Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: AppColors.cardDark,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Text(
+                          'Welcome',
+                          style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Enter your email to start streaming instantly.',
+                          style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                        ),
+                        const SizedBox(height: 16),
+                        TextField(
+                          controller: _emailCtrl,
+                          keyboardType: TextInputType.emailAddress,
+                          decoration: InputDecoration(
+                            labelText: 'Your Email Address',
+                            prefixIcon: const Icon(Icons.email_outlined, color: AppColors.primaryBlue),
+                            filled: true,
+                            fillColor: AppColors.cardElevated,
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                          ),
+                        ),
+                        if (_error != null) ...[
+                          const SizedBox(height: 12),
+                          Text(_error!, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
+                        ],
+                        const SizedBox(height: 20),
+                        ElevatedButton(
+                          onPressed: _submitting ? null : _submit,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.primaryBlue,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 15),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                          ),
+                          child: const Text(
+                            'START LISTENING',
+                            style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.1),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  OutlinedButton.icon(
+                    onPressed: widget.authController.continueAsGuest,
+                    icon: const Icon(Icons.person_outline),
+                    label: const Text('CONTINUE AS GUEST'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.textPrimary,
+                      side: const BorderSide(color: Colors.white24),
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }
@@ -863,7 +688,6 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isSearching = false;
   String? _searchError;
 
-  // Clean pure music genres
   final List<({String label, String query, IconData icon})> _genreCategories = [
     (label: 'Baroque Pop & Psychedelic Rock', query: 'Baroque Pop Psychedelic Rock', icon: Icons.album_rounded),
     (label: 'Drift Phonk', query: 'Drift Phonk', icon: Icons.flash_on_rounded),
@@ -1026,7 +850,6 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           
-          // Genre Section Header
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 12, 16, 8),
             child: Text(
@@ -1040,7 +863,6 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
 
-          // Genre Chips
           SizedBox(
             height: 48,
             child: ListView.separated(
